@@ -3,11 +3,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from kanalanalyse import (ProfileSample, follower_forecast, follower_range,
+from kanalanalyse import (ProfileSample,
                           load_profile_history, parse_profile_html,
-                          parse_profile_url, period_change, profile_history_path,
+                          parse_profile_url, profile_history_path,
                           save_profile_sample)
 from tiktokanalyse import ParseError
+from trendanalyse import analyse, project, points_from, window_change
 
 
 def profile_html(username="zeitkante", followers="5694"):
@@ -33,14 +34,14 @@ class ChannelTests(unittest.TestCase):
             parse_profile_html(profile_html(followers="5.7K"), username)
 
     def test_profile_history_growth_and_forecast(self):
-        samples = [ProfileSample(100000 + i * 1800, "123", "zeitkante", "Zeitkante",
+        samples = [ProfileSample(100000 + i * 600, "123", "zeitkante", "Zeitkante",
                                  1000 + i * 10, 200, 500 + i * 20, 10, 2)
-                   for i in range(4)]
-        self.assertEqual(period_change(samples, "followers", 3600)[0], 20)
-        self.assertIsNone(period_change(samples, "followers", 86400))
-        model = follower_forecast(samples)
-        self.assertIsNotNone(model)
-        low, middle, high = follower_range(samples[-1].followers, *model, 2)
+                   for i in range(13)]
+        self.assertEqual(window_change(points_from(samples, "followers"), 3600), 60)
+        self.assertIsNone(window_change(points_from(samples, "followers"), 86400))
+        model = analyse(samples, "followers", channel=True)
+        self.assertTrue(model.ready)
+        low, middle, high = project(model, 48)
         self.assertLessEqual(low, middle)
         self.assertLessEqual(middle, high)
         with TemporaryDirectory() as directory:

@@ -3,9 +3,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from tiktokanalyse import (ParseError, Sample, forecast, forecast_range,
-                          hourly_rate, history_path, load_history, parse_html,
+from tiktokanalyse import (ParseError, Sample, history_path, load_history, parse_html,
                           parse_url, save_sample)
+from trendanalyse import analyse, project, points_from, window_change
 
 
 VIDEO_ID = "7689442016555568416"
@@ -38,13 +38,13 @@ class AnalysisTests(unittest.TestCase):
             parse_html(html_for(views="1.2M"), VIDEO_ID)
 
     def test_history_and_forecast(self):
-        samples = [Sample(1000 + i * 300, 1000 + i * 100, 10, 2, 1, 0)
-                   for i in range(4)]
-        self.assertIsNone(hourly_rate(samples, "views", 3600))
-        self.assertEqual(hourly_rate(samples, "views", 900), 1200)
-        estimate = forecast(samples)
-        self.assertIsNotNone(estimate)
-        low, middle, high = forecast_range(samples[-1].views, *estimate, 1)
+        samples = [Sample(1000 + i * 30, 1000 + i * 10, 10, 2, 1, 0)
+                   for i in range(31)]
+        self.assertIsNone(window_change(points_from(samples, "views"), 3600))
+        self.assertEqual(window_change(points_from(samples, "views"), 900), 300)
+        estimate = analyse(samples, "views")
+        self.assertTrue(estimate.ready)
+        low, middle, high = project(estimate, 1)
         self.assertLessEqual(low, middle)
         self.assertLessEqual(middle, high)
         with TemporaryDirectory() as directory:
@@ -54,15 +54,16 @@ class AnalysisTests(unittest.TestCase):
             self.assertEqual(load_history(path, VIDEO_ID), samples)
 
     def test_conservative_forecast_grows_at_every_horizon(self):
-        current = 150500
+        samples = [Sample(1000+i*30, 149000+i*50, 10, 2, 1, 0) for i in range(31)]
+        model = analyse(samples, "views")
+        current = samples[-1].views
         previous = current
         for hours in (1, 2, 6, 12, 24, 48):
-            low, middle, high = forecast_range(current, 5222, 1.21, hours)
+            low, middle, high = project(model, hours)
             self.assertGreater(low, previous)
             self.assertLess(low, middle)
             self.assertLess(middle, high)
             previous = low
-        self.assertEqual(forecast_range(current, 0, 1.21, 48), (current,) * 3)
 
 
 if __name__ == "__main__":

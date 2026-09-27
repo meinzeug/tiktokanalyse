@@ -4,28 +4,21 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
 from html.parser import HTMLParser
 import json
 import math
 import os
 from pathlib import Path
 import re
-import statistics
 import sys
 import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-from rich.align import Align
-from rich.box import ROUNDED, SIMPLE
-from rich.console import Console, Group
-from rich.live import Live
-from rich.panel import Panel
-from rich.table import Table
-from rich.text import Text
+from rich.console import Console
 
+from analyse_tui import monitor
 
 METRICS = ("views", "likes", "comments", "shares", "favorites")
 LABELS = {"views": "Aufrufe", "likes": "Likes", "comments": "Kommentare",
@@ -33,7 +26,6 @@ LABELS = {"views": "Aufrufe", "likes": "Likes", "comments": "Kommentare",
 STAT_KEYS = {"views": "playCount", "likes": "diggCount",
              "comments": "commentCount", "shares": "shareCount",
              "favorites": "collectCount"}
-HORIZONS = (1, 2, 6, 12, 24, 48)
 USER_AGENT = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 
@@ -183,132 +175,6 @@ def save_sample(path: Path, video_id: str, sample: Sample) -> None:
         file.write(json.dumps({"video_id": video_id, **asdict(sample)}, separators=(",", ":")) + "\n")
 
 
-def format_int(value: int | float) -> str:
-    return f"{round(value):,}".replace(",", ".")
-
-
-def format_delta(value: int) -> str:
-    return f"+{format_int(value)}" if value >= 0 else f"−{format_int(-value)}"
-
-
-def _past_sample(samples: list[Sample], seconds: float) -> Sample | None:
-    if len(samples) < 2:
-        return None
-    target = samples[-1].timestamp - seconds
-    candidates = [sample for sample in samples[:-1] if sample.timestamp <= target]
-    return candidates[-1] if candidates else samples[0]
-
-
-def hourly_rate(samples: list[Sample], metric: str, seconds: float) -> float | None:
-    past = _past_sample(samples, seconds)
-    if past is None:
-        return None
-    elapsed = samples[-1].timestamp - past.timestamp
-    if elapsed < max(60, seconds * 0.8):
-        return None
-    return max(0, getattr(samples[-1], metric) - getattr(past, metric)) * 3600 / elapsed
-
-
-def forecast(samples: list[Sample]) -> tuple[float, float] | None:
-    if len(samples) < 3 or samples[-1].timestamp - samples[0].timestamp < 300:
-        return None
-    rates = [(hourly_rate(samples, "views", seconds), weight)
-             for seconds, weight in ((300, 0.20), (900, 0.35),
-                                     (3600, 0.30), (21600, 0.15))]
-    available = [(rate, weight) for rate, weight in rates if rate is not None]
-    if not available:
-        return None
-    baseline = sum(rate * weight for rate, weight in available) / sum(weight for _, weight in available)
-    # Unterschiede zwischen kurzen und langen Zeitfenstern geben eine einfache
-    # Unsicherheitsschätzung; bei wenig Daten ist das Band bewusst breiter.
-    spread = statistics.pstdev([rate for rate, _ in available]) if len(available) > 1 else baseline * 0.5
-    age_hours = (samples[-1].timestamp - samples[0].timestamp) / 3600
-    uncertainty = max(0.25, spread / max(baseline, 1), 0.7 / math.sqrt(max(age_hours, 0.1)))
-    return baseline, uncertainty
-
-
-def forecast_range(current: int, rate: float, uncertainty: float, hours: int) -> tuple[int, int, int]:
-    # Alle Szenarien integrieren eine positive, langsam abnehmende Rate.
-    # So wächst auch das vorsichtige Szenario bei gemessenem Wachstum weiter,
-    # statt durch eine breite Unsicherheit auf den aktuellen Stand zu fallen.
-    def effective_hours(half_life: float) -> float:
-        return half_life / math.log(2) * (1 - 2 ** (-hours / half_life))
-
-    low = current + rate / (1 + uncertainty) * effective_hours(6)
-    middle = current + rate * effective_hours(12)
-    high = current + rate * (1 + uncertainty) * effective_hours(24)
-    return round(low), round(middle), round(high)
-
-
-def sparkline(samples: list[Sample], metric: str = "views", width: int = 36) -> str:
-    points = samples[-max(2, width):]
-    if len(points) < 2:
-        return "·" * width
-    values = [getattr(point, metric) for point in points]
-    lo, hi = min(values), max(values)
-    blocks = "▁▂▃▄▅▆▇█"
-    if hi == lo:
-        return "▁" * len(values)
-    return "".join(blocks[min(7, round((value - lo) / (hi - lo) * 7))] for value in values)
-
-
-def dashboard(samples: list[Sample], creator: str, video_id: str,
-              interval: float, next_poll: float, status: str) -> Group:
-    latest = samples[-1] if samples else None
-    title = Text(f"@{creator}  ·  Video {video_id}", style="bold cyan")
-    metrics = Table.grid(expand=True, padding=(0, 2))
-    for _ in range(5):
-        metrics.add_column(ratio=1)
-    previous = samples[-2] if len(samples) > 1 else None
-    cells = []
-    for name in METRICS:
-        value = getattr(latest, name) if latest else None
-        delta = getattr(latest, name) - getattr(previous, name) if latest and previous else None
-        cell = Text()
-        cell.append(LABELS[name] + "\n", style="dim")
-        cell.append(format_int(value) if value is not None else "—", style="bold white")
-        if delta is not None:
-            cell.append("\n" + format_delta(delta), style="green" if delta >= 0 else "yellow")
-        cells.append(cell)
-    metrics.add_row(*cells)
-
-    rates = Table.grid(expand=True, padding=(0, 3))
-    for _ in range(3):
-        rates.add_column(ratio=1)
-    labels = []
-    for label, seconds in (("15 Min.", 900), ("1 Std.", 3600), ("6 Std.", 21600)):
-        rate = hourly_rate(samples, "views", seconds)
-        labels.append(f"{label}: {format_int(rate)}/h" if rate is not None else f"{label}: sammelt Daten")
-    rates.add_row(*labels)
-
-    predictions = Table(box=SIMPLE, expand=True, header_style="bold cyan")
-    predictions.add_column("In", width=8)
-    predictions.add_column("Vorsichtig", justify="right")
-    predictions.add_column("Trend", justify="right", style="bold")
-    predictions.add_column("Optimistisch", justify="right")
-    model = forecast(samples)
-    if latest and model:
-        for hours in HORIZONS:
-            low, mid, high = forecast_range(latest.views, *model, hours)
-            predictions.add_row(f"{hours} h", format_int(low), format_int(mid), format_int(high))
-    else:
-        predictions.add_row("—", "—", "Erste Prognose nach 5 Minuten Messdaten", "—")
-
-    updated = (datetime.fromtimestamp(latest.timestamp, timezone.utc).astimezone().strftime("%d.%m.%Y %H:%M:%S")
-               if latest else "noch keine Messung")
-    countdown = max(0, math.ceil(next_poll - time.monotonic()))
-    footer = Text(f"Letzter Abruf: {updated}  ·  Messpunkte: {len(samples)}  ·  Nächster Abruf: {countdown}s\n")
-    footer.append(status, style="green" if status == "Aktuell" else "yellow")
-    note = Text("Trendfortschreibung mit abnehmender Dynamik; das Band ist ein Szenario, keine statistische Garantie.", style="dim")
-    return Group(
-        Panel(Align.center(title), title="TIKTOK · LIVE", border_style="cyan"),
-        Panel(metrics, title="Kennzahlen  ·  Änderung seit letztem Abruf", border_style="blue"),
-        Panel(Group(Text(sparkline(samples), style="bright_cyan"), rates), title="Aufruftrend", border_style="blue"),
-        Panel(Group(predictions, note), title="Aufrufprognose", border_style="magenta"),
-        Panel(footer, border_style="dim"),
-    )
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="TikTok-Videostatistiken live verfolgen")
     parser.add_argument("url", help="HTTPS-Adresse eines öffentlichen TikTok-Videos")
@@ -318,6 +184,8 @@ def main(argv: list[str] | None = None) -> int:
                         default=Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "tiktokanalyse",
                         help="Verzeichnis für die Messhistorie")
     parser.add_argument("--once", action="store_true", help="Einmal abrufen und Ergebnis ausgeben")
+    parser.add_argument("--page", type=int, choices=(1, 2, 3, 4), default=1,
+                        help="Startansicht: 1 Übersicht, 2 Prognose, 3 Verlauf, 4 Details")
     args = parser.parse_args(argv)
     try:
         url, creator, video_id = parse_url(args.url)
@@ -332,36 +200,11 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as exc:
         console.print(f"[red]Messhistorie nicht lesbar:[/red] {exc}")
         return 1
-    status = "Starte Abruf ..."
-    next_poll = time.monotonic()
-
-    def poll() -> None:
-        nonlocal status
-        try:
-            sample = fetch_sample(url, video_id)
-            save_sample(path, video_id, sample)
-            samples.append(sample)
-            status = "Aktuell"
-        except (ParseError, RuntimeError, OSError) as exc:
-            status = f"Abruf fehlgeschlagen: {exc} · erneuter Versuch folgt"
-
-    if args.once:
-        poll()
-        console.print(dashboard(samples, creator, video_id, args.interval, time.monotonic(), status))
-        return 0 if status == "Aktuell" else 1
-
-    try:
-        with Live(dashboard(samples, creator, video_id, args.interval, next_poll, status),
-                  console=console, refresh_per_second=2, screen=True) as live:
-            while True:
-                if time.monotonic() >= next_poll:
-                    poll()
-                    next_poll = time.monotonic() + args.interval
-                live.update(dashboard(samples, creator, video_id, args.interval, next_poll, status))
-                time.sleep(min(0.5, max(0.05, next_poll - time.monotonic())))
-    except KeyboardInterrupt:
-        console.print("Analyse beendet. Messhistorie gespeichert:", str(path))
-    return 0
+    return monitor(samples, lambda: fetch_sample(url, video_id),
+                   lambda sample: save_sample(path, video_id, sample),
+                   title=f"@{creator} • Video {video_id}", labels=LABELS,
+                   primary="views", channel=False, path=path, interval=args.interval,
+                   once=args.once, page=args.page)
 
 
 if __name__ == "__main__":
