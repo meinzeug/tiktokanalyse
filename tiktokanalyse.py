@@ -39,7 +39,7 @@ USER_AGENT = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
 
 
 class ParseError(ValueError):
-    """Die Antwort enthält keine gültigen Zahlen für dieses Video."""
+    """Die Antwort enthält keine gültigen Statistikdaten."""
 
 
 class ScriptExtractor(HTMLParser):
@@ -129,6 +129,10 @@ def parse_html(html: str, video_id: str, timestamp: float | None = None) -> Samp
 
 
 def fetch_sample(url: str, video_id: str) -> Sample:
+    return parse_html(fetch_html(url), video_id)
+
+
+def fetch_html(url: str) -> str:
     request = Request(url, headers={
         "User-Agent": USER_AGENT,
         "Accept": "text/html,application/xhtml+xml",
@@ -147,7 +151,7 @@ def fetch_sample(url: str, video_id: str) -> Sample:
         raise RuntimeError(f"HTTP {exc.code}: TikTok hat die Anfrage abgewiesen.") from exc
     except URLError as exc:
         raise RuntimeError(f"Netzwerkfehler: {exc.reason}") from exc
-    return parse_html(html.decode("utf-8", errors="replace"), video_id)
+    return html.decode("utf-8", errors="replace")
 
 
 def history_path(data_dir: Path, video_id: str) -> Path:
