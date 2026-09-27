@@ -53,6 +53,17 @@ class AnalysisTests(unittest.TestCase):
                 save_sample(path, VIDEO_ID, sample)
             self.assertEqual(load_history(path, VIDEO_ID), samples)
 
+    def test_conservative_forecast_grows_at_every_horizon(self):
+        current = 150500
+        previous = current
+        for hours in (1, 2, 6, 12, 24, 48):
+            low, middle, high = forecast_range(current, 5222, 1.21, hours)
+            self.assertGreater(low, previous)
+            self.assertLess(low, middle)
+            self.assertLess(middle, high)
+            previous = low
+        self.assertEqual(forecast_range(current, 0, 1.21, 48), (current,) * 3)
+
 
 if __name__ == "__main__":
     unittest.main()

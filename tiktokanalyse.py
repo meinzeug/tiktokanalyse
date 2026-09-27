@@ -228,12 +228,15 @@ def forecast(samples: list[Sample]) -> tuple[float, float] | None:
 
 
 def forecast_range(current: int, rate: float, uncertainty: float, hours: int) -> tuple[int, int, int]:
-    # Fallende Dynamik: Halbwertszeit 12 Stunden. Szenarioband wächst mit Horizont.
-    effective_hours = 12 / math.log(2) * (1 - 2 ** (-hours / 12))
-    middle = current + rate * effective_hours
-    width = min(2.0, uncertainty * math.sqrt(hours))
-    low = current + max(0, rate * (1 - width)) * effective_hours
-    high = current + rate * (1 + width) * effective_hours
+    # Alle Szenarien integrieren eine positive, langsam abnehmende Rate.
+    # So wächst auch das vorsichtige Szenario bei gemessenem Wachstum weiter,
+    # statt durch eine breite Unsicherheit auf den aktuellen Stand zu fallen.
+    def effective_hours(half_life: float) -> float:
+        return half_life / math.log(2) * (1 - 2 ** (-hours / half_life))
+
+    low = current + rate / (1 + uncertainty) * effective_hours(6)
+    middle = current + rate * effective_hours(12)
+    high = current + rate * (1 + uncertainty) * effective_hours(24)
     return round(low), round(middle), round(high)
 
 
