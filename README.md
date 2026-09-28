@@ -62,6 +62,10 @@ Ein Modelljahr entspricht 365,25 Tagen. Alle sechs Ziele einer Ansicht passen ab
 
 Videoabrufe erfolgen standardmäßig alle 30 Sekunden, Kanalabrufe alle 60 Sekunden; Minimum jeweils 10 Sekunden. Historien liegen unter `~/.local/share/tiktokanalyse/<video-id>.jsonl` beziehungsweise `kanal_<name>.jsonl`. `XDG_DATA_HOME` und `--data-dir PFAD` werden berücksichtigt. Verschiedene Videos und Kanäle können gleichzeitig in getrennten Konsolen laufen. Dasselbe Ziel nur einmal gleichzeitig überwachen, um doppelte Messpunkte zu vermeiden.
 
+**Nach einem Neustart sind die alten Daten weiterhin vorhanden.** Der Kennzahlenbereich zeigt auf jeder Seite die Zahl gespeicherter Messpunkte und die gesamte Messdauer. Nach einer längeren Unterbrechung beginnt nur das aktuelle Trendfenster neu: Beim Video braucht es wieder mindestens 5 Minuten und 6 frische Messpunkte, beim Kanal 1 Stunde und mindestens 6 Punkte. Die Anzeige nennt das ausdrücklich „Neuer Trend nach Messpause“. Ansicht `3` zeigt die gespeicherten Messungen; Ansicht `4` unterscheidet Gesamthistorie, aktuelles Trendfenster und Lernhistorie.
+
+Die Lernerfahrung bleibt während dieser Wartezeit in Ansicht `5` sichtbar. Dort erscheinen die gespeicherten Fallzahlen und historischen Fehler, während eine neue Modellkorrektur noch aussteht. Sobald der aktuelle Trend wieder bereit ist, zeigt die Tabelle die für das Modell ausgewählten Lernfälle. Die Zeile „Lernhistorie“ zählt stets alle gespeicherten Fälle der gewählten Kennzahl über sämtliche Horizonte, einschließlich noch offener und ausgeschlossener Prüfungen. `0/0` in einer Tabellenzeile bedeutet ausschließlich, dass **für dieses Ziel** noch kein abgeschlossener Fall vorliegt. Mit `-` lassen sich die kürzeren, früher auswertbaren Horizonte anzeigen.
+
 ## Was die Prognose erkennt
 
 Die Gesamtzahl der Aufrufe kann weiter steigen, während die **neuen Aufrufe pro Stunde** bereits deutlich sinken. Diesen Unterschied berücksichtigt das Modell:

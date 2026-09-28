@@ -91,6 +91,55 @@ class LearningTests(unittest.TestCase):
             self.assertGreater(learner.skipped_count("views"), 0)
             self.assertEqual(learner.db.execute("SELECT COUNT(*) FROM forecasts WHERE actual IS NOT NULL").fetchone()[0], 0)
 
+    def test_summary_preserves_stored_learning_through_gap_and_restart(self):
+        series = {"views": measured(1), "likes": measured(1, rate=12, base=100)}
+        data = measured(2)
+        with Learner(self.path) as learner:
+            models = {metric: fit(points, monotone=metric == "views") for metric, points in series.items()}
+            learner.observe(series, models, source="replay")
+            initial = learner.summary("views")
+            self.assertEqual(initial["total"], len(learner.horizons))
+            self.assertEqual(initial["pending"], initial["total"])
+            self.assertEqual(initial["evaluated"], 0)
+            self.assertTrue(all(row["mae"] is None and row["bias"] is None
+                                for row in initial["horizons"].values()))
+            likes = learner.summary("likes")
+            for count in (14, 15):
+                points = data[:count]
+                learner.observe({"views": points}, {"views": fit(points)})
+            completed = learner.summary("views")
+            self.assertEqual(completed["evaluated"], 2)
+            short = completed["horizons"][300]
+            self.assertEqual(short["count"], 2)
+            self.assertEqual(short["live_count"], 1)
+            errors = [row["prediction"]-row["actual"] for row in learner.db.execute(
+                "SELECT prediction,actual FROM forecasts WHERE metric='views' AND actual IS NOT NULL")]
+            self.assertAlmostEqual(short["mae"], sum(abs(error) for error in errors)/2)
+            self.assertAlmostEqual(short["bias"], sum(errors)/2)
+
+            gap = points+(Point(points[-1].timestamp+7200, 15000),)
+            model = fit(gap)
+            self.assertFalse(model.ready)
+            learner.observe({"views": gap}, {"views": model})
+            restored = learner.summary("views")
+            self.assertEqual(restored["total"], completed["total"])
+            self.assertEqual(restored["evaluated"], 2)
+            self.assertEqual(restored["skipped"], 4)
+            self.assertEqual(restored["pending"], restored["total"]-6)
+            skipped = restored["horizons"][900]
+            self.assertEqual((skipped["count"], skipped["pending"], skipped["skipped"]), (0, 0, 1))
+            self.assertIsNone(skipped["mae"])
+            self.assertIsNone(skipped["bias"])
+            self.assertEqual(learner.summary("likes"), likes)
+
+        with Learner(self.path) as learner:
+            changes = learner.db.total_changes
+            self.assertEqual(learner.summary("views"), restored)
+            self.assertEqual(learner.summary("likes"), likes)
+            self.assertEqual(learner.summary("comments"), {
+                "total": 0, "evaluated": 0, "pending": 0, "skipped": 0, "horizons": {}})
+            self.assertEqual(learner.db.total_changes, changes)
+
     def test_metrics_train_independently_and_signed_counts_can_fall(self):
         series = {"views": measured(8), "likes": measured(8, rate=-6, base=100),
                   "comments": measured(8, rate=0, base=42)}

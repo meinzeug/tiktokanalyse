@@ -290,6 +290,30 @@ class Learner:
         return self.db.execute("""SELECT * FROM forecasts WHERE metric=? AND actual IS NOT NULL
             ORDER BY target DESC, horizon DESC LIMIT ?""", (metric, limit)).fetchall()
 
+    def summary(self, metric: str) -> dict:
+        """Gespeicherte Lernfälle unabhängig vom aktuellen Trendfenster zählen.
+
+        Anders als die phasenabhängigen Modellgewichte umfasst diese Übersicht
+        alle Fälle der Kennzahl. Fehler beziehen sich auf die Originalprognosen;
+        noch offene und übersprungene Fälle tragen keinen Fehler bei.
+        """
+        rows = self.db.execute("""
+            SELECT horizon, COUNT(*) AS total, COUNT(actual) AS count,
+                SUM(CASE WHEN actual IS NOT NULL AND source='live' THEN 1 ELSE 0 END) AS live_count,
+                AVG(CASE WHEN actual IS NOT NULL THEN ABS(prediction-actual) END) AS mae,
+                AVG(CASE WHEN actual IS NOT NULL THEN prediction-actual END) AS bias,
+                SUM(CASE WHEN actual IS NULL AND skipped IS NULL THEN 1 ELSE 0 END) AS pending,
+                SUM(CASE WHEN skipped IS NOT NULL THEN 1 ELSE 0 END) AS skipped
+            FROM forecasts WHERE metric=? GROUP BY horizon ORDER BY horizon
+        """, (metric,)).fetchall()
+        horizons = {row["horizon"]: {key: row[key] for key in row.keys() if key != "horizon"}
+                    for row in rows}
+        return {"total": sum(row["total"] for row in rows),
+                "evaluated": sum(row["count"] for row in rows),
+                "pending": sum(row["pending"] for row in rows),
+                "skipped": sum(row["skipped"] for row in rows),
+                "horizons": horizons}
+
     def skipped_count(self, metric: str) -> int:
         return self.db.execute("SELECT COUNT(*) FROM forecasts WHERE metric=? AND skipped IS NOT NULL",
                                (metric,)).fetchone()[0]

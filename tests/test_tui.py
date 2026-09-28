@@ -101,3 +101,65 @@ class TuiTests(unittest.TestCase):
                                 self.assertIn("q Ende", rendered)
                                 self.assertTrue(rendered.splitlines()[-4].rstrip().endswith("╯"))
                                 self.assertEqual(len(rendered.splitlines()), 20)
+
+    def test_pause_shows_saved_history_separately_from_fresh_trend(self):
+        initial = [Sample(100000+i*30, 100000+i*50, 100+i, 20+i//3, 1, 0)
+                   for i in range(121)]
+        for gap in (1800, 8*3600):
+            samples = initial+[Sample(initial[-1].timestamp+gap+i*30, 108000+i*50, 225+i, 62, 1, 0)
+                               for i in range(2)]
+            report = Report(samples, "@test", LABELS, "views", False, Path("test.jsonl"), 30)
+            self.assertFalse(report.model.ready)
+            self.assertEqual(len(report.model.points), 2)
+            self.assertEqual(report.pause_seconds, gap)
+            for width, height in ((60, 20), (80, 24), (120, 40)):
+                for page in (1, 2, 3, 4):
+                    with self.subTest(gap=gap, width=width, height=height, page=page):
+                        console = Console(width=width, height=height, file=StringIO())
+                        console.print(report.screen(console, page, "Aktuell", time.monotonic()+30, False))
+                        rendered = console.file.getvalue()
+                        self.assertIn("Gespeichert: 123 Punkte", rendered)
+                        self.assertIn("q Ende", rendered)
+                        if page in (1, 2, 4):
+                            self.assertIn("Messpause", rendered)
+                        if page in (1, 4):
+                            self.assertIn("Trendfenster: 2 Punkte", rendered)
+                        self.assertEqual(len(rendered.splitlines()), height)
+
+    def test_saved_learning_remains_visible_during_warmup_after_restart(self):
+        initial = [Sample(100000+i*30, 100000+i*50, 100+i, 20+i//3, 1, 0)
+                   for i in range(361)]
+        with TemporaryDirectory() as directory:
+            path = Path(directory)/"video.jsonl"
+            database = path.with_suffix(".sqlite3")
+            with Learner(database) as learner:
+                before = Report(initial, "@test", LABELS, "views", False, path, 30, learner, "48h")
+                learner.bootstrap(before.series)
+                saved = learner.summary("views")
+                self.assertGreater(saved["horizons"][3600]["count"], 0)
+            samples = initial+[Sample(initial[-1].timestamp+1800+i*30, 120000+i*20, 470+i, 145, 1, 0)
+                               for i in range(2)]
+            with Learner(database) as learner:
+                writes_before = learner.db.total_changes
+                report = Report(samples, "@test", LABELS, "views", False, path, 30, learner, "48h")
+                self.assertFalse(report.model.ready)
+                self.assertEqual(report.predictions["views"], {})
+                self.assertEqual(report.learning_history["views"], saved)
+                for width, height in ((60, 20), (80, 24)):
+                    console = Console(width=width, height=height, file=StringIO())
+                    console.print(report.screen(console, 5, "Aktuell", time.monotonic()+30, False))
+                    rendered = console.file.getvalue()
+                    self.assertIn(f"Lernhistorie: {saved['total']} Fälle", rendered)
+                    self.assertIn("erhalten", rendered)
+                    self.assertIn("Trend wartet", rendered)
+                    self.assertIn("48 h", rendered)
+                    self.assertIn("q Ende", rendered)
+                    self.assertTrue(rendered.splitlines()[-4].rstrip().endswith("╯"))
+                    self.assertEqual(len(rendered.splitlines()), height)
+                self.assertEqual(learner.db.total_changes, writes_before)
+                samples.extend(Sample(initial[-1].timestamp+1800+i*30, 120000+i*20, 470+i, 145, 1, 0)
+                               for i in range(2, 12))
+                report.refresh()
+                self.assertTrue(report.model.ready)
+                self.assertGreater(report.predictions["views"][3600].count, 0)
+                self.assertEqual(report.learning_history["views"], saved)

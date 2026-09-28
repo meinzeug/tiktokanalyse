@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from datetime import datetime
 import math
 import os
@@ -96,6 +97,33 @@ class Report:
     def check(self):
         return self.checks[self.primary]
 
+    @property
+    def history_span(self):
+        points = self.series[self.primary]
+        return points[-1].timestamp-points[0].timestamp if points else 0
+
+    @property
+    def pause_seconds(self):
+        # Auch nach Pausen außerhalb des Modellfensters bleibt die letzte
+        # Messung davor in der vollständigen Historie auffindbar.
+        points = self.series[self.primary]
+        if not self.model.points:
+            return 0
+        index = bisect_left(points, self.model.points[0].timestamp, key=lambda point: point.timestamp)
+        if not index:
+            return 0
+        gap = points[index].timestamp-points[index-1].timestamp
+        limit = max(3600 if self.channel else 300, self.model.cadence*5)
+        return gap if gap > limit else 0
+
+    @property
+    def waiting_reason(self):
+        if self.pause_seconds or self.model.gap:
+            return "Neuer Trend nach Messpause"
+        if self.model.corrections:
+            return "Neuer Trend nach Zählerkorrektur"
+        return "Sammelt Daten"
+
     def cycle_metric(self):
         self.primary = self.available_metrics[(self.available_metrics.index(self.primary)+1) % len(self.available_metrics)]
 
@@ -108,6 +136,9 @@ class Report:
         self.predictions = {metric: self.learner.predict_all(metric, model)
                             if self.learner and model.ready else {}
                             for metric, model in self.models.items()}
+        self.learning_history = {metric: self.learner.summary(metric) if self.learner else {
+            "total": 0, "evaluated": 0, "pending": 0, "skipped": 0, "horizons": {}}
+            for metric in self.available_metrics}
 
     def learn(self):
         if self.learner:
@@ -147,7 +178,8 @@ class Report:
                 text.append(" " + delta(change), style="green" if change >= 0 else "yellow")
             cells.append(text)
         table.add_row(*cells)
-        return Panel(table, title="Kennzahlen • Δ seit letztem Abruf", border_style="blue")
+        return Panel(table, title="Kennzahlen • Δ seit letztem Abruf", border_style="blue",
+                     subtitle=Text(f"Gespeichert: {number(len(self.series[self.primary]))} Punkte • {duration(self.history_span)}"))
 
     def trend(self, compact=False):
         model = self.model
@@ -155,11 +187,13 @@ class Report:
         if model.rate < 0:
             style = "red"
         lines = Text()
-        lines.append(model.state + "\n", style=f"bold {style}")
+        lines.append((model.state if model.ready else self.waiting_reason) + "\n", style=f"bold {style}")
         if not model.ready:
             minimum = 3600 if self.channel else 300
             lines.append(f"Noch {duration(max(0, minimum-model.span))} Verlauf / mindestens 6 Messpunkte.\n")
-            lines.append(f"Bisher {len(model.points)} Punkte über {duration(model.span)}.\n", style="dim")
+            lines.append(f"Frisches Trendfenster: {len(model.points)} Punkte / {duration(model.span)}.\n", style="dim")
+            if len(self.series[self.primary]) > len(model.points):
+                lines.append("Ältere Messungen und Lernfälle bleiben gespeichert.\n", style="yellow")
             if model.rate_series:
                 lines.append(f"Vorläufiges Tempo: {delta(model.rate)}/h • Prognose sammelt Daten.\n", style="cyan")
                 lines.append("Tempo  " + spark([point.value for point in model.rate_series]), style="cyan")
@@ -199,7 +233,9 @@ class Report:
             return Panel(Text("Warte auf weitere Messpunkte …", style="dim"), title="Tempo im Verlauf")
         rates = self.model.rate_series
         if not rates:
-            return Panel(Text("Noch zu wenig Verlauf für geglättete Raten.", style="dim"), title="Tempo im Verlauf")
+            return Panel(Text("Für das aktuelle Trendfenster fehlen noch Raten.\n"
+                              f"{number(len(self.series[self.primary]))} Messpunkte insgesamt gespeichert.", style="dim"),
+                         title="Tempo im Verlauf")
         values = [point.value for point in rates]
         low, high = min(0, min(values)), max(0, max(values))
         if high == low:
@@ -251,9 +287,16 @@ class Report:
         if self.horizon in ("1y", "10y"):
             note = Text("* Extrapolation; langfristig stark annahmenabhängig.", style="yellow")
         note.append(f"\nBasis: {duration(self.model.span)} • geprüft: {checked}/{len(horizons)} Ziele")
+        if not self.model.ready:
+            minimum = 3600 if self.channel else 300
+            note = Text(self.waiting_reason, style="yellow")
+            note.append(f"\nNoch {duration(max(0, minimum-self.model.span))} / mindestens 6 frische Punkte.")
         if details:
-            note.append("\nGeprüft = mindestens ein abgeschlossener Fall; Details unter 5.")
-            note.append("\nNeue Ausspielwellen und Beiträge bleiben unbekannt.")
+            if self.model.ready:
+                note.append("\nGeprüft = mindestens ein abgeschlossener Fall; Details unter 5.")
+                note.append("\nNeue Ausspielwellen und Beiträge bleiben unbekannt.")
+            else:
+                note.append("\nTaste 3: Messverlauf • Taste 5: Lernhistorie.")
         return Panel(Group(table, note), title=f"Prognose • {self.labels[self.primary]} • {range_title}",
                      border_style="magenta")
 
@@ -266,12 +309,13 @@ class Report:
         for label in columns:
             table.add_column(label, justify="left" if label in ("Ziel", "Modell") else "right")
         predictions = self.predictions[self.primary]
+        history = self.learning_history[self.primary]
         range_title, horizons = HORIZON_RANGES[self.horizon]
         if self.horizon == "48h" and not compact and not self.channel:
             horizons = (300, 900, *horizons)
-        if predictions:
-            for seconds in horizons:
-                learned = predictions[seconds]
+        for seconds in horizons:
+            learned = predictions.get(seconds)
+            if learned:
                 winner = max(learned.weights, key=learned.weights.get)
                 short_names = {"adaptive": "Dynamik", "fast": "Kurz", "slow": "Lang", "linear": "Linear", "flat": "Flach"}
                 row = [horizon_label(seconds, hours_only=self.horizon == "48h"),
@@ -281,12 +325,21 @@ class Report:
                 if width >= 75:
                     row.append(delta(learned.correction))
                 row.append(f"{short_names[winner]} {learned.weights[winner]:.0%}" + (" *" if learned.contextual else ""))
-                table.add_row(*row)
-        else:
-            table.add_row(*(["—", "0/0", "—", "—"] + (["—"] if width >= 75 else []) + ["sammelt Daten"]))
-        note = Text("L/R = Live/Replay; 0/0 = noch ungeprüft.", style="dim")
-        note.append("\nBias +: zu hoch, −: zu niedrig.")
+            else:
+                saved = history["horizons"].get(seconds, {})
+                count, live = saved.get("count", 0), saved.get("live_count", 0)
+                row = [horizon_label(seconds, hours_only=self.horizon == "48h"), f"{live}/{count-live}",
+                       number(saved["mae"]) if saved.get("mae") is not None else "—",
+                       delta(saved["bias"]) if saved.get("bias") is not None else "—"]
+                if width >= 75:
+                    row.append("—")
+                row.append("erhalten" if count else "ungeprüft")
+            table.add_row(*row)
+        note = Text(f"Lernhistorie: {number(history['total'])} Fälle • {number(history['evaluated'])} bewertet", style="dim")
+        note.append("\nTrend wartet; Lernerfahrung bleibt gespeichert." if not self.model.ready and history["total"]
+                    else "\n0/0: Ziel ungeprüft; -/+ wechselt den Zeitraum.")
         if not compact:
+            note.append("\nL/R: Live/Replay • Bias +: zu hoch, −: zu niedrig.")
             note.append("\nKorr. = nächste Anpassung; * = Lernen aus ähnlicher Phase.")
         return Panel(Group(table, note), title=f"Lernstand • {self.labels[self.primary]} • {range_title}", border_style="green")
 
@@ -320,10 +373,15 @@ class Report:
 
     def quality(self, compact=False):
         model = self.model
-        text = Text(f"Basis: {model.quality} • {len(model.points)} nutzbare Punkte • {duration(model.span)} Verlauf\n")
-        text.append(f"Typischer Abstand: {duration(model.cadence)} • kleinste gemeinsame Zählerstufe: {number(model.quantum)}\n")
-        if model.gap:
-            text.append("Messpause erkannt; Prognose nutzt nur den anschließenden Verlauf.\n", style="yellow")
+        history = self.learning_history[self.primary]
+        text = Text(f"Historie: {number(len(self.series[self.primary]))} Punkte • {duration(self.history_span)} gespeichert\n")
+        text.append(f"Trendfenster: {len(model.points)} Punkte • {duration(model.span)} • Basis: {model.quality}\n")
+        text.append(f"Lernhistorie: {number(history['total'])} Fälle • {number(history['evaluated'])} bewertet\n")
+        if not compact:
+            text.append(f"Typischer Abstand: {duration(model.cadence)} • kleinste gemeinsame Zählerstufe: {number(model.quantum)}\n")
+        if self.pause_seconds or model.gap:
+            text.append(f"Messpause: {duration(self.pause_seconds)}; neuer Trend ab danach.\n" if self.pause_seconds
+                        else "Messpause im Trendfenster erkannt.\n", style="yellow")
         if model.corrections:
             text.append(f"{model.corrections} Zählerrücksprünge: getrennt vom Wachstum behandelt.\n", style="yellow")
         if self.check:
@@ -359,7 +417,7 @@ class Report:
             table.add_row(datetime.fromtimestamp(sample.timestamp).strftime("%d.%m. %H:%M:%S"),
                           number(getattr(sample, self.primary)), delta(change) if change is not None else "—",
                           duration(sample.timestamp-prior.timestamp) if prior else "—", number(sample.likes))
-        return Panel(table, title="Letzte Messungen", border_style="blue")
+        return Panel(table, title=f"Messverlauf • {number(len(self.samples))} gespeicherte Punkte", border_style="blue")
 
     def footer(self, status, next_poll, busy, page, compact=False):
         remaining = max(0, math.ceil(next_poll-time.monotonic()))
@@ -391,12 +449,12 @@ class Report:
         if page == 2:
             body = self.forecast(width, details=body_height >= 15)
             if body_height >= 26:
-                body = Group(body, self.quality())
+                body = Group(body, self.quality(compact=True))
         elif page == 3:
             body = self.history(max(1, body_height-4))
         elif page == 4:
             body = (Group(self.quality(compact=True), self.windows())
-                    if body_height >= 17 and width >= 75 else self.quality())
+                    if body_height >= 20 and width >= 75 else self.quality(compact=body_height < 20))
         elif page == 5:
             body = self.learning(width, compact=body_height < 16)
         elif page == 6:
@@ -407,7 +465,7 @@ class Report:
             grid.add_column(ratio=1)
             grid.add_row(self.trend(compact=body_height < 11), self.chart(width//2, max(2, min(6, body_height-6))))
             if body_height >= 28:
-                grid.add_row(self.forecast(width//2), self.quality())
+                grid.add_row(self.forecast(width//2), self.quality(compact=True))
             body = grid
         else:
             if body_height >= 15:
