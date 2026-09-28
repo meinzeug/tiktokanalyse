@@ -23,6 +23,7 @@ from rich.table import Table
 from rich.text import Text
 
 from prognose_lernen import Learner
+from prognose_zeiten import HORIZON_RANGES, YEAR, horizon_label
 from trendanalyse import analyse, backtest, expected_gain, points_from, project, window_change
 
 
@@ -30,11 +31,20 @@ def number(value: float) -> str:
     return f"{round(value):,}".replace(",", ".")
 
 
+def compact_number(value: float) -> str:
+    for scale, unit in ((1e12, "Bio."), (1e9, "Mrd."), (1e6, "Mio.")):
+        if abs(value) >= scale:
+            return f"{value / scale:.1f} {unit}".replace(".", ",", 1)
+    return number(value)
+
+
 def delta(value: float) -> str:
     return ("+" if value >= 0 else "−") + number(abs(value))
 
 
 def duration(seconds: float) -> str:
+    if seconds >= YEAR:
+        return f"{seconds / YEAR:.1f} Jahre".replace(".", ",")
     if seconds >= 86400:
         return f"{seconds / 86400:.1f} Tage".replace(".", ",")
     if seconds >= 3600:
@@ -55,11 +65,15 @@ def spark(values: list[float]) -> str:
 
 class Report:
     def __init__(self, samples, title: str, labels: dict[str, str], primary: str,
-                 channel: bool, path: Path, interval: float, learner: Learner | None = None):
+                 channel: bool, path: Path, interval: float, learner: Learner | None = None,
+                 horizon: str = "4w"):
         self.samples, self.title, self.labels = samples, title, labels
         self.primary, self.channel, self.path, self.interval = primary, channel, path, interval
         self.available_metrics = ("followers", "likes") if channel else ("views", "likes", "comments")
         self.learner = learner
+        if horizon not in HORIZON_RANGES:
+            raise ValueError("Unbekannter Prognosezeitraum.")
+        self.horizon = horizon
         self.revision = None
         self.refresh()
 
@@ -84,6 +98,11 @@ class Report:
 
     def cycle_metric(self):
         self.primary = self.available_metrics[(self.available_metrics.index(self.primary)+1) % len(self.available_metrics)]
+
+    def change_horizon(self, direction: int):
+        ranges = tuple(HORIZON_RANGES)
+        index = max(0, min(len(ranges)-1, ranges.index(self.horizon)+direction))
+        self.horizon = ranges[index]
 
     def update_predictions(self):
         self.predictions = {metric: self.learner.predict_all(metric, model)
@@ -203,33 +222,39 @@ class Report:
         return Panel(graph, title="Tempo / h • zeitlicher Verlauf", border_style="blue")
 
     def forecast(self, width: int, details=False):
+        format_count = compact_number if width < 95 else number
         table = Table(box=box.SIMPLE_HEAD, show_edge=False, expand=True, header_style="bold magenta")
         table.add_column("In")
         for label in ("Vorsichtig", "Trend", "Optimistisch"):
             table.add_column(label, justify="right", style="bold white" if label == "Trend" else "")
         if width >= 95:
             table.add_column("Δ Trend", justify="right")
-        horizons = (24, 48, 168, 720) if self.channel else (1, 2, 6, 12, 24, 48)
-        for hours in horizons:
-            label = f"{hours//24} d" if self.channel else f"{hours} h"
-            far = hours * 3600 > self.model.span * 3
+        range_title, horizons = HORIZON_RANGES[self.horizon]
+        for seconds in horizons:
+            label = horizon_label(seconds, hours_only=self.horizon == "48h")
+            far = seconds > self.model.span * 3
             label += " *" if far else ""
             row = [label]
             if self.model.ready:
-                learned = self.predictions[self.primary].get(hours*3600)
+                learned = self.predictions[self.primary].get(seconds)
                 low, mid, high = ((learned.low, learned.middle, learned.high) if learned
-                                 else project(self.model, hours))
-                row += [number(low), number(mid), number(high)]
+                                 else project(self.model, seconds/3600))
+                row += [format_count(low), format_count(mid), format_count(high)]
                 if width >= 95:
                     row.append(delta(mid-self.model.points[-1].value))
             else:
                 row += ["—", "—", "—"] + (["—"] if width >= 95 else [])
             table.add_row(*row)
-        note = Text("* Weit über Messdauer hinaus. Szenarien, keine Wahrscheinlichkeiten.", style="dim")
+        checked = sum(bool(self.predictions[self.primary].get(seconds) and
+                           self.predictions[self.primary][seconds].count) for seconds in horizons)
+        note = Text("* Fernes Ziel; keine Wahrscheinlichkeitsintervalle.", style="dim")
+        if self.horizon in ("1y", "10y"):
+            note = Text("* Extrapolation; langfristig stark annahmenabhängig.", style="yellow")
+        note.append(f"\nBasis: {duration(self.model.span)} • geprüft: {checked}/{len(horizons)} Ziele")
         if details:
-            note.append("\nGewichte und Fehlerkorrektur lernen aus abgeschlossenen Prüffällen.")
-            note.append("\nNeue Ausspielwellen oder neue Beiträge sind nicht vorhersehbar.")
-        return Panel(Group(table, note), title=f"Prognose • {self.labels[self.primary]} • m wechselt",
+            note.append("\nGeprüft = mindestens ein abgeschlossener Fall; Details unter 5.")
+            note.append("\nNeue Ausspielwellen und Beiträge bleiben unbekannt.")
+        return Panel(Group(table, note), title=f"Prognose • {self.labels[self.primary]} • {range_title}",
                      border_style="magenta")
 
     def learning(self, width, compact=False):
@@ -241,13 +266,16 @@ class Report:
         for label in columns:
             table.add_column(label, justify="left" if label in ("Ziel", "Modell") else "right")
         predictions = self.predictions[self.primary]
+        range_title, horizons = HORIZON_RANGES[self.horizon]
+        if self.horizon == "48h" and not compact and not self.channel:
+            horizons = (300, 900, *horizons)
         if predictions:
-            for seconds, learned in predictions.items():
-                if compact and seconds < (86400 if self.channel else 3600):
-                    continue
+            for seconds in horizons:
+                learned = predictions[seconds]
                 winner = max(learned.weights, key=learned.weights.get)
                 short_names = {"adaptive": "Dynamik", "fast": "Kurz", "slow": "Lang", "linear": "Linear", "flat": "Flach"}
-                row = [duration(seconds), f"{learned.live_count}/{learned.count-learned.live_count}",
+                row = [horizon_label(seconds, hours_only=self.horizon == "48h"),
+                       f"{learned.live_count}/{learned.count-learned.live_count}",
                        number(learned.mae) if learned.mae is not None else "—",
                        delta(learned.bias) if learned.bias is not None else "—"]
                 if width >= 75:
@@ -256,10 +284,11 @@ class Report:
                 table.add_row(*row)
         else:
             table.add_row(*(["—", "0/0", "—", "—"] + (["—"] if width >= 75 else []) + ["sammelt Daten"]))
-        note = Text("Bias +: zu hoch, −: zu niedrig. Replay = Historie.", style="dim")
+        note = Text("L/R = Live/Replay; 0/0 = noch ungeprüft.", style="dim")
+        note.append("\nBias +: zu hoch, −: zu niedrig.")
         if not compact:
             note.append("\nKorr. = nächste Anpassung; * = Lernen aus ähnlicher Phase.")
-        return Panel(Group(table, note), title=f"Lernstand • {self.labels[self.primary]}", border_style="green")
+        return Panel(Group(table, note), title=f"Lernstand • {self.labels[self.primary]} • {range_title}", border_style="green")
 
     def errors(self, rows=8):
         table = Table(box=box.SIMPLE_HEAD, show_edge=False, expand=True, header_style="cyan")
@@ -268,7 +297,7 @@ class Report:
         cases = self.learner.outcomes(self.primary, rows) if self.learner else []
         for case in cases:
             table.add_row(datetime.fromtimestamp(case["target"]).strftime("%d.%m. %H:%M"),
-                          duration(case["horizon"]), number(case["prediction"]), number(case["actual"]),
+                          horizon_label(case["horizon"]), number(case["prediction"]), number(case["actual"]),
                           delta(case["prediction"]-case["actual"]), "Live" if case["source"] == "live" else "Replay")
         if not cases:
             table.add_row("Noch keine abgeschlossenen Prüffälle", "", "", "", "", "")
@@ -342,7 +371,7 @@ class Report:
         text.append("\n")
         for key, label in ((1, "Start"), (2, "Progn."), (3, "Verlauf"), (4, "Details"), (5, "Lernen"), (6, "Fehler")):
             text.append(f"{key} {label} ", style="bold cyan" if key == page else "dim")
-        text.append(f"\nm Kennzahl: {self.labels[self.primary]}  r Abruf  q Ende", style="dim")
+        text.append("\nm Kennzahl  -/+ Zeitraum  r Abruf  q Ende", style="dim")
         return text if compact else Panel(text, border_style="dim")
 
     def screen(self, console, page, status, next_poll, busy):
@@ -427,9 +456,9 @@ def monitor(samples, fetch, save, **options):
 
 
 def _monitor(samples, fetch, save, *, title, labels, primary, channel, path,
-             interval, once=False, page=1, metric=None, learner):
+             interval, once=False, page=1, metric=None, horizon="4w", learner):
     console = Console()
-    report = Report(samples, title, labels, metric or primary, channel, path, interval, learner)
+    report = Report(samples, title, labels, metric or primary, channel, path, interval, learner, horizon)
     with console.status("Werte die bisherige Messhistorie chronologisch aus …"):
         learner.bootstrap(report.series)
         report.update_predictions()
@@ -474,6 +503,10 @@ def _monitor(samples, fetch, save, *, title, labels, primary, channel, path,
                         page = int(key)
                     if key == "m" or key == "\t":
                         report.cycle_metric()
+                    if key in "+=-":
+                        report.change_horizon(-1 if key == "-" else 1)
+                        if page != 5:
+                            page = 2
                     if key == "r" and not busy:
                         next_poll = time.monotonic()
                 if busy:

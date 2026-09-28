@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 from rich.console import Console
 
 from analyse_tui import monitor
+from prognose_zeiten import add_horizon_argument
 from tiktokanalyse import ParseError, ScriptExtractor, _number, fetch_html
 
 METRICS = ("followers", "following", "likes", "videos", "friends")
@@ -135,6 +136,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="Startansicht: 1 Übersicht, 2 Prognose, 3 Verlauf, 4 Details, 5 Lernen, 6 Fehler")
     parser.add_argument("--metric", choices=("followers", "likes"), default="followers",
                         help="Ausgewählte Kennzahl (in der TUI mit m wechseln)")
+    add_horizon_argument(parser)
     args = parser.parse_args(argv)
     try:
         url, username = parse_profile_url(args.url)
@@ -153,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
                    lambda sample: save_profile_sample(path, sample),
                    title=f"@{username} • Kanal", labels=LABELS, primary="followers",
                    channel=True, path=path, interval=args.interval,
-                   once=args.once, page=args.page, metric=args.metric)
+                   once=args.once, page=args.page, metric=args.metric, horizon=args.horizon)
 
 
 if __name__ == "__main__":

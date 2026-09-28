@@ -2,7 +2,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from prognose_lernen import Learner, PRIORS
+from prognose_lernen import Learner, PRIORS, LEGACY_VIDEO_HORIZONS
+from prognose_zeiten import DAY, YEAR
 from trendanalyse import Point, fit
 
 
@@ -119,6 +120,69 @@ class LearningTests(unittest.TestCase):
             self.assertGreater(forecasts[86400].count, 0)
             self.assertGreater(learner.predict("likes", models["likes"], 86400).count, 0)
             self.assertEqual(forecasts[30*86400].count, 0)
+
+    def test_four_week_forecast_settles_after_restart_without_training_years(self):
+        initial = measured(1)
+        data = measured(1+28*24)
+        with Learner(self.path) as learner:
+            learner.observe({"views": initial}, {"views": fit(initial)})
+            original = dict(learner.db.execute("SELECT * FROM forecasts WHERE horizon=?", (28*DAY,)).fetchone())
+            learner.observe({"views": data[:-1]}, {"views": fit(data[:-1])})
+            self.assertEqual(learner.predict("views", fit(data[:-1]), 28*DAY).count, 0)
+        with Learner(self.path) as learner:
+            learner.observe({"views": data}, {"views": fit(data)})
+            result = dict(learner.db.execute("SELECT * FROM forecasts WHERE horizon=? ORDER BY origin", (28*DAY,)).fetchone())
+            for key in ("origin", "target", "prediction", "candidates", "weights", "low", "high"):
+                self.assertEqual(result[key], original[key])
+            self.assertEqual(result["actual"], data[-1].value)
+            self.assertEqual(learner.predict("views", fit(data), 28*DAY).live_count, 1)
+            distant = learner.predict("views", fit(data), int(10*YEAR))
+            self.assertEqual(distant.count, 0)
+            self.assertEqual(distant.weights, PRIORS)
+            self.assertIsNotNone(learner.db.execute("SELECT target FROM forecasts WHERE horizon=?", (int(10*YEAR),)).fetchone())
+
+    def test_old_database_gains_new_horizons_without_replacing_forecasts(self):
+        initial = measured(1)
+        data = measured(30*24)
+        with Learner(self.path) as learner:
+            learner.horizons = LEGACY_VIDEO_HORIZONS
+            learner.observe({"views": initial}, {"views": fit(initial)})
+            with learner.db:
+                learner.db.execute("INSERT INTO metadata VALUES ('bootstrapped', '1')")
+            original = [tuple(row) for row in learner.db.execute(
+                "SELECT metric,horizon,origin,prediction,weights FROM forecasts ORDER BY horizon")]
+        with Learner(self.path) as learner:
+            learner.bootstrap({"views": data})
+            existing = [tuple(row) for row in learner.db.execute(
+                "SELECT metric,horizon,origin,prediction,weights FROM forecasts WHERE source='live' ORDER BY horizon")]
+            self.assertEqual(existing, original)
+            self.assertGreater(learner.predict("views", fit(data), 28*DAY).count, 0)
+            self.assertEqual(learner.predict("views", fit(data), 28*DAY).live_count, 0)
+            count = learner.db.execute("SELECT COUNT(*) FROM forecasts").fetchone()[0]
+            learner.bootstrap({"views": data})
+            self.assertEqual(learner.db.execute("SELECT COUNT(*) FROM forecasts").fetchone()[0], count)
+
+    def test_ten_year_scenarios_stay_ordered_finite_and_nonnegative(self):
+        for metric, data, monotone in (("views", measured(3), True),
+                                       ("likes", measured(3, rate=-6, base=100), False),
+                                       ("comments", measured(3, rate=0, base=42), False)):
+            with self.subTest(metric=metric), Learner(self.path) as learner:
+                forecasts = learner.predict_all(metric, fit(data, monotone=monotone))
+                self.assertIn(28*DAY, forecasts)
+                self.assertIn(int(10*YEAR), forecasts)
+                previous = data[-1].value
+                for forecast in forecasts.values():
+                    self.assertGreaterEqual(forecast.low, 0)
+                    self.assertLessEqual(forecast.low, forecast.middle)
+                    self.assertLessEqual(forecast.middle, forecast.high)
+                    self.assertIsInstance(forecast.high, int)
+                    if monotone:
+                        self.assertGreaterEqual(forecast.middle, previous)
+                        previous = forecast.middle
+                if metric == "likes":
+                    self.assertLess(forecasts[int(10*YEAR)].middle, data[-1].value)
+                elif metric == "comments":
+                    self.assertEqual(forecasts[int(10*YEAR)].middle, 42)
 
 
 if __name__ == "__main__":

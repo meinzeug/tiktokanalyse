@@ -14,6 +14,7 @@ import math
 from pathlib import Path
 import sqlite3
 
+from prognose_zeiten import CHANNEL_HORIZONS, VIDEO_HORIZONS
 from trendanalyse import Point, Trend, expected_gain, fit, project, value_at
 
 
@@ -25,8 +26,8 @@ EXPERTS = {
     "flat": "Stillstand",
 }
 PRIORS = {"adaptive": 0.45, "fast": 0.15, "slow": 0.15, "linear": 0.15, "flat": 0.10}
-VIDEO_HORIZONS = (300, 900, 3600, 7200, 21600, 43200, 86400, 172800)
-CHANNEL_HORIZONS = (3600, 21600, 86400, 172800, 604800, 2592000)
+LEGACY_VIDEO_HORIZONS = (300, 900, 3600, 7200, 21600, 43200, 86400, 172800)
+LEGACY_CHANNEL_HORIZONS = (3600, 21600, 86400, 172800, 604800, 2592000)
 
 
 @dataclass(frozen=True)
@@ -219,7 +220,7 @@ class Learner:
                 (actual, now, reason, row["metric"], row["horizon"], row["origin"]))
 
     def observe(self, series: dict[str, tuple[Point, ...]], models: dict[str, Trend], *, source="live",
-                commit=True):
+                commit=True, horizons=None):
         if not series or not all(series.values()):
             return
         now = min(points[-1].timestamp for points in series.values())
@@ -229,7 +230,7 @@ class Learner:
                 if not model.ready:
                     continue
                 forecasts = self.predict_all(metric, model)
-                for seconds in self.horizons:
+                for seconds in self.horizons if horizons is None else horizons:
                     last = self.db.execute("SELECT MAX(origin) FROM forecasts WHERE metric=? AND horizon=?",
                                            (metric, seconds)).fetchone()[0]
                     # Pro Horizont nacheinander lernen, statt überlappende,
@@ -246,19 +247,29 @@ class Learner:
                          prediction.low, prediction.middle, prediction.high))
 
     def bootstrap(self, series: dict[str, tuple[Point, ...]]):
-        """Einmaliger chronologischer Rücklauf, klar als Simulation gespeichert."""
-        if self.db.execute("SELECT value FROM metadata WHERE key='bootstrapped'").fetchone():
-            return
+        """Neue Horizonte chronologisch nachspielen; vorhandene Fälle erhalten."""
         if not series or not all(series.values()):
             return
+        row = self.db.execute("SELECT value FROM metadata WHERE key='bootstrapped_horizons'").fetchone()
+        if row:
+            done = set(json.loads(row[0]))
+        elif self.db.execute("SELECT value FROM metadata WHERE key='bootstrapped'").fetchone():
+            done = set(LEGACY_CHANNEL_HORIZONS if self.channel else LEGACY_VIDEO_HORIZONS)
+        else:
+            done = set()
+        missing = set(self.horizons) - done
+        if not missing:
+            return
         primary = next(iter(series.values()))
-        maximum_days = 90 if self.channel else 14
+        maximum_days = 90
         start = max(primary[0].timestamp, primary[-1].timestamp-maximum_days*86400)
         span = primary[-1].timestamp-start
         spacing = max(3600 if self.channel else 300, span/240)
+        # Ziele ohne beobachtbaren Endpunkt liefern noch keine Lernerfahrung.
+        eligible = tuple(seconds for seconds in self.horizons if seconds in missing and seconds < span)
         previous = start-spacing
         with self.db:
-            for point in primary[:-1]:
+            for point in primary[:-1] if eligible else ():
                 if point.timestamp < start or point.timestamp < previous+spacing:
                     continue
                 previous = point.timestamp
@@ -266,12 +277,14 @@ class Learner:
                             for metric, points in series.items()}
                 models = {metric: fit(points, channel=self.channel, monotone=metric == "views")
                           for metric, points in prefixes.items()}
-                self.observe(prefixes, models, source="replay", commit=False)
+                self.observe(prefixes, models, source="replay", commit=False, horizons=eligible)
             self._settle(series, min(points[-1].timestamp for points in series.values()))
             # Simulation dient als Starttraining. Unbeobachtete Replay-Ziele
             # dürfen keine künftig tatsächlich ausgegebene Live-Prognose ersetzen.
             self.db.execute("DELETE FROM forecasts WHERE source='replay' AND actual IS NULL AND skipped IS NULL")
             self.db.execute("INSERT OR REPLACE INTO metadata VALUES ('bootstrapped', '1')")
+            self.db.execute("INSERT OR REPLACE INTO metadata VALUES ('bootstrapped_horizons', ?)",
+                            (json.dumps(sorted(done | missing)),))
 
     def outcomes(self, metric: str, limit=6):
         return self.db.execute("""SELECT * FROM forecasts WHERE metric=? AND actual IS NOT NULL

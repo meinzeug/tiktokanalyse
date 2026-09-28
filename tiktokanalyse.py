@@ -19,6 +19,7 @@ from urllib.request import Request, urlopen
 from rich.console import Console
 
 from analyse_tui import monitor
+from prognose_zeiten import add_horizon_argument
 
 METRICS = ("views", "likes", "comments", "shares", "favorites")
 LABELS = {"views": "Aufrufe", "likes": "Likes", "comments": "Kommentare",
@@ -188,6 +189,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="Startansicht: 1 Übersicht, 2 Prognose, 3 Verlauf, 4 Details, 5 Lernen, 6 Fehler")
     parser.add_argument("--metric", choices=("views", "likes", "comments"), default="views",
                         help="Ausgewählte Kennzahl (in der TUI mit m wechseln)")
+    add_horizon_argument(parser)
     args = parser.parse_args(argv)
     try:
         url, creator, video_id = parse_url(args.url)
@@ -206,7 +208,7 @@ def main(argv: list[str] | None = None) -> int:
                    lambda sample: save_sample(path, video_id, sample),
                    title=f"@{creator} • Video {video_id}", labels=LABELS,
                    primary="views", channel=False, path=path, interval=args.interval,
-                   once=args.once, page=args.page, metric=args.metric)
+                   once=args.once, page=args.page, metric=args.metric, horizon=args.horizon)
 
 
 if __name__ == "__main__":
