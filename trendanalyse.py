@@ -91,16 +91,19 @@ def robust_rate(points: tuple[Point, ...], start: float, end: float) -> float:
 
 
 def analyse(samples: Iterable, metric: str, *, channel: bool = False) -> Trend:
-    return fit(points_from(samples, metric), channel=channel)
+    return fit(points_from(samples, metric), channel=channel,
+               monotone=not channel and metric == "views")
 
 
-def fit(raw: tuple[Point, ...], *, channel: bool = False) -> Trend:
+def fit(raw: tuple[Point, ...], *, channel: bool = False, monotone: bool | None = None) -> Trend:
+    if monotone is None:
+        monotone = not channel
     minimum = 3600 if channel else 300
     max_window = 21600 if channel else 1800
     lookback = 7 * 86400 if channel else 6 * 3600
     default_half_life = 168.0 if channel else 12.0
     if not raw:
-        return Trend((), half_life=default_half_life, monotone=not channel)
+        return Trend((), half_life=default_half_life, monotone=monotone)
     raw = tuple(point for point in raw if point.timestamp >= raw[-1].timestamp - lookback)
     differences = [right.timestamp - left.timestamp for left, right in zip(raw, raw[1:])]
     cadence = median(differences[-200:]) if differences else 60.0
@@ -108,7 +111,7 @@ def fit(raw: tuple[Point, ...], *, channel: bool = False) -> Trend:
     gaps = [i for i in range(1, len(raw)) if raw[i].timestamp - raw[i-1].timestamp > gap_limit]
     points = list(raw[gaps[-1]:] if gaps else raw)
     corrections = 0
-    if not channel:
+    if monotone:
         cleaned = []
         for index, point in enumerate(points):
             if cleaned and point.value < cleaned[-1].value:
@@ -130,7 +133,7 @@ def fit(raw: tuple[Point, ...], *, channel: bool = False) -> Trend:
         steps = [abs(round(points[i].value - points[i-1].value)) for i in changes[-30:]]
         quantum = float(max(1, math.gcd(*steps)))
     base = dict(points=points, cadence=cadence, half_life=default_half_life,
-                monotone=not channel, quantum=quantum, unchanged=unchanged,
+                monotone=monotone, quantum=quantum, unchanged=unchanged,
                 corrections=corrections, gap=bool(gaps))
     if len(points) < 6 or span < 300:
         return Trend(**base)
@@ -143,7 +146,7 @@ def fit(raw: tuple[Point, ...], *, channel: bool = False) -> Trend:
     end = points[-1].timestamp
     recent = robust_rate(points, end - window, end)
     previous = robust_rate(points, end - 2 * window, end - window) if span >= 2 * window else None
-    if not channel:
+    if monotone:
         recent = max(0.0, recent)
         previous = max(0.0, previous) if previous is not None else None
     resolution = quantum * 3600 / window
@@ -172,7 +175,7 @@ def fit(raw: tuple[Point, ...], *, channel: bool = False) -> Trend:
                 state = "Beschleunigt" if recent > 0 else "Verluste nehmen zu"
                 boost = math.copysign(min(abs(recent), abs(recent - previous)), recent)
     if recent < 0 and state == "Gleichmäßig":
-        state = "Followerverlust"
+        state = "Bestand sinkt"
 
     # Gleich breite Zeitbalken für Geschwindigkeitsgrafik und Streuung.
     count = min(24, max(2, int(span / max(cadence * 3, window / 3))))
@@ -238,7 +241,8 @@ def project(model: Trend, hours: float) -> tuple[int, int, int]:
     return low, mid, high
 
 
-def backtest(raw: tuple[Point, ...], *, channel: bool = False) -> Backtest | None:
+def backtest(raw: tuple[Point, ...], *, channel: bool = False,
+             monotone: bool | None = None) -> Backtest | None:
     """Vergangene Prognosen nachspielen, ausschließlich mit damaligen Daten."""
     if len(raw) < 12:
         return None
@@ -257,7 +261,7 @@ def backtest(raw: tuple[Point, ...], *, channel: bool = False) -> Backtest | Non
         prefix = raw[:index]
         if len(prefix) < 6:
             continue
-        model = fit(prefix, channel=channel)
+        model = fit(prefix, channel=channel, monotone=monotone)
         if not model.ready:
             continue
         target = prefix[-1].timestamp + horizon
@@ -268,7 +272,7 @@ def backtest(raw: tuple[Point, ...], *, channel: bool = False) -> Backtest | Non
                 target - future[-1].timestamp > model.cadence * 2 or
                 any(gap > max(minimum, model.cadence * 5) for gap in gaps)):
             continue
-        if not channel and any(b.value < a.value for a, b in zip(future_with_anchor, future_with_anchor[1:])):
+        if model.monotone and any(b.value < a.value for a, b in zip(future_with_anchor, future_with_anchor[1:])):
             continue
         actual = value_at(raw, target)
         prediction = prefix[-1].value + expected_gain(model, horizon / 3600)

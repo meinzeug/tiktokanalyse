@@ -22,6 +22,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from prognose_lernen import Learner
 from trendanalyse import analyse, backtest, expected_gain, points_from, project, window_change
 
 
@@ -54,9 +55,11 @@ def spark(values: list[float]) -> str:
 
 class Report:
     def __init__(self, samples, title: str, labels: dict[str, str], primary: str,
-                 channel: bool, path: Path, interval: float):
+                 channel: bool, path: Path, interval: float, learner: Learner | None = None):
         self.samples, self.title, self.labels = samples, title, labels
         self.primary, self.channel, self.path, self.interval = primary, channel, path, interval
+        self.available_metrics = ("followers", "likes") if channel else ("views", "likes", "comments")
+        self.learner = learner
         self.revision = None
         self.refresh()
 
@@ -65,12 +68,36 @@ class Report:
         if revision == self.revision:
             return
         self.revision = revision
-        self.model = analyse(self.samples, self.primary, channel=self.channel)
-        self.check = backtest(self.model.points, channel=self.channel)
+        self.series = {metric: points_from(self.samples, metric) for metric in self.available_metrics}
+        self.models = {metric: analyse(self.samples, metric, channel=self.channel) for metric in self.available_metrics}
+        self.checks = {metric: backtest(model.points, channel=self.channel, monotone=model.monotone)
+                       for metric, model in self.models.items()}
+        self.update_predictions()
+
+    @property
+    def model(self):
+        return self.models[self.primary]
+
+    @property
+    def check(self):
+        return self.checks[self.primary]
+
+    def cycle_metric(self):
+        self.primary = self.available_metrics[(self.available_metrics.index(self.primary)+1) % len(self.available_metrics)]
+
+    def update_predictions(self):
+        self.predictions = {metric: self.learner.predict_all(metric, model)
+                            if self.learner and model.ready else {}
+                            for metric, model in self.models.items()}
+
+    def learn(self):
+        if self.learner:
+            self.learner.observe(self.series, self.models)
+            self.update_predictions()
 
     def header(self, width: int):
         mode = "KANAL" if self.channel else "VIDEO"
-        return Panel(Text(self.title, style="bold cyan", overflow="ellipsis", no_wrap=True),
+        return Panel(Text(f"{self.title} • {self.labels[self.primary]}", style="bold cyan", overflow="ellipsis", no_wrap=True),
                      title=f"TIKTOK • {mode} LIVE", border_style="cyan")
 
     def metrics(self, detailed=False):
@@ -135,12 +162,12 @@ class Report:
                 lines.append("Trend bleibt bei unverändertem Zähler zunächst flach.\n")
             if model.measured_decay and not compact:
                 remaining = expected_gain(model, model.half_life*20)
-                lines.append(f"Restzuwachs bei gleicher Abbremsung: {delta(remaining)}\n")
+                lines.append(f"Dynamikmodell: Rest bei gleicher Abbremsung {delta(remaining)}\n")
             lines.append(f"Zähler seit {duration(model.unchanged)} unverändert • Basis: {model.quality}\n")
             if not compact:
                 lines.append("Tempo  " + spark([point.value for point in model.rate_series]) + "\n", style="bright_cyan")
-                if self.channel:
-                    lines.append("Followerverluste fließen als negatives Wachstum ein.", style="dim")
+                if not model.monotone:
+                    lines.append("Rückgänge fließen als negatives Nettowachstum ein.", style="dim")
                 else:
                     lines.append("Plateaus können auch durch Rundung oder Cache entstehen.", style="dim")
         if lines.plain.endswith("\n"):
@@ -189,7 +216,9 @@ class Report:
             label += " *" if far else ""
             row = [label]
             if self.model.ready:
-                low, mid, high = project(self.model, hours)
+                learned = self.predictions[self.primary].get(hours*3600)
+                low, mid, high = ((learned.low, learned.middle, learned.high) if learned
+                                 else project(self.model, hours))
                 row += [number(low), number(mid), number(high)]
                 if width >= 95:
                     row.append(delta(mid-self.model.points[-1].value))
@@ -198,10 +227,52 @@ class Report:
             table.add_row(*row)
         note = Text("* Weit über Messdauer hinaus. Szenarien, keine Wahrscheinlichkeiten.", style="dim")
         if details:
-            note.append("\nBei Abbremsung passt sich die Kurve an das gemessene Tempo an.")
+            note.append("\nGewichte und Fehlerkorrektur lernen aus abgeschlossenen Prüffällen.")
             note.append("\nNeue Ausspielwellen oder neue Beiträge sind nicht vorhersehbar.")
-        return Panel(Group(table, note), title="Follower-Prognose" if self.channel else "Aufrufprognose",
+        return Panel(Group(table, note), title=f"Prognose • {self.labels[self.primary]} • m wechselt",
                      border_style="magenta")
+
+    def learning(self, width, compact=False):
+        table = Table(box=box.SIMPLE_HEAD, show_edge=False, expand=True, header_style="cyan")
+        columns = ["Ziel", "Live/Replay" if width >= 75 else "L/R", "Fehler Ø", "Bias"]
+        if width >= 75:
+            columns.append("Korr.")
+        columns.append("Modell")
+        for label in columns:
+            table.add_column(label, justify="left" if label in ("Ziel", "Modell") else "right")
+        predictions = self.predictions[self.primary]
+        if predictions:
+            for seconds, learned in predictions.items():
+                if compact and seconds < (86400 if self.channel else 3600):
+                    continue
+                winner = max(learned.weights, key=learned.weights.get)
+                short_names = {"adaptive": "Dynamik", "fast": "Kurz", "slow": "Lang", "linear": "Linear", "flat": "Flach"}
+                row = [duration(seconds), f"{learned.live_count}/{learned.count-learned.live_count}",
+                       number(learned.mae) if learned.mae is not None else "—",
+                       delta(learned.bias) if learned.bias is not None else "—"]
+                if width >= 75:
+                    row.append(delta(learned.correction))
+                row.append(f"{short_names[winner]} {learned.weights[winner]:.0%}" + (" *" if learned.contextual else ""))
+                table.add_row(*row)
+        else:
+            table.add_row(*(["—", "0/0", "—", "—"] + (["—"] if width >= 75 else []) + ["sammelt Daten"]))
+        note = Text("Bias +: zu hoch, −: zu niedrig. Replay = Historie.", style="dim")
+        if not compact:
+            note.append("\nKorr. = nächste Anpassung; * = Lernen aus ähnlicher Phase.")
+        return Panel(Group(table, note), title=f"Lernstand • {self.labels[self.primary]}", border_style="green")
+
+    def errors(self, rows=8):
+        table = Table(box=box.SIMPLE_HEAD, show_edge=False, expand=True, header_style="cyan")
+        for label in ("Zielzeit", "Horizont", "Prognose", "Ist", "Fehler", "Art"):
+            table.add_column(label, justify="left" if label in ("Zielzeit", "Art") else "right")
+        cases = self.learner.outcomes(self.primary, rows) if self.learner else []
+        for case in cases:
+            table.add_row(datetime.fromtimestamp(case["target"]).strftime("%d.%m. %H:%M"),
+                          duration(case["horizon"]), number(case["prediction"]), number(case["actual"]),
+                          delta(case["prediction"]-case["actual"]), "Live" if case["source"] == "live" else "Replay")
+        if not cases:
+            table.add_row("Noch keine abgeschlossenen Prüffälle", "", "", "", "", "")
+        return Panel(table, title=f"Soll / Ist • {self.labels[self.primary]}", border_style="green")
 
     def windows(self):
         table = Table(box=box.SIMPLE_HEAD, expand=True, show_edge=False, header_style="cyan")
@@ -269,9 +340,9 @@ class Report:
             text.append(f" • Daten {duration(age)} alt")
         text.append(" • Abruf läuft …" if busy else f" • Nächster Abruf {remaining}s")
         text.append("\n")
-        for key, label in ((1, "Start"), (2, "Prognose"), (3, "Verlauf"), (4, "Details")):
-            text.append(f"{key} {label}  ", style="bold cyan" if key == page else "dim")
-        text.append("r Abruf  q Ende", style="dim")
+        for key, label in ((1, "Start"), (2, "Progn."), (3, "Verlauf"), (4, "Details"), (5, "Lernen"), (6, "Fehler")):
+            text.append(f"{key} {label} ", style="bold cyan" if key == page else "dim")
+        text.append(f"\nm Kennzahl: {self.labels[self.primary]}  r Abruf  q Ende", style="dim")
         return text if compact else Panel(text, border_style="dim")
 
     def screen(self, console, page, status, next_poll, busy):
@@ -283,11 +354,11 @@ class Report:
                          self.footer(status, next_poll, busy, page))
         root = Layout()
         compact = height < 28
-        head = Text(self.title, style="bold cyan", no_wrap=True, overflow="ellipsis") if compact else self.header(width)
+        head = Text(f"{self.title} • {self.labels[self.primary]}", style="bold cyan", no_wrap=True, overflow="ellipsis") if compact else self.header(width)
         root.split_column(Layout(head, size=1 if compact else 3), Layout(self.metrics(), size=4),
                           Layout(name="body"),
-                          Layout(self.footer(status, next_poll, busy, page, compact), size=2 if compact else 4))
-        body_height = height - (7 if compact else 11)
+                          Layout(self.footer(status, next_poll, busy, page, compact), size=3 if compact else 5))
+        body_height = height - (8 if compact else 12)
         if page == 2:
             body = self.forecast(width, details=body_height >= 15)
             if body_height >= 26:
@@ -297,6 +368,10 @@ class Report:
         elif page == 4:
             body = (Group(self.quality(compact=True), self.windows())
                     if body_height >= 17 and width >= 75 else self.quality())
+        elif page == 5:
+            body = self.learning(width, compact=body_height < 16)
+        elif page == 6:
+            body = self.errors(max(1, body_height-5))
         elif width >= 110:
             grid = Table.grid(expand=True)
             grid.add_column(ratio=1)
@@ -314,8 +389,16 @@ class Report:
         return root
 
     def full(self, width):
+        selected = self.primary
+        forecasts = []
+        try:
+            for metric in self.available_metrics:
+                self.primary = metric
+                forecasts.extend((self.forecast(width, details=True), self.learning(width)))
+        finally:
+            self.primary = selected
         return Group(self.header(width), self.metrics(detailed=True), self.trend(), self.chart(width),
-                     self.forecast(width, details=True), self.windows(), self.quality(), self.history(),
+                     *forecasts, self.windows(), self.quality(), self.errors(), self.history(),
                      Text(f"Historie: {self.path}", style="dim"))
 
 
@@ -338,10 +421,18 @@ class TerminalKeys:
             termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old)
 
 
-def monitor(samples, fetch, save, *, title, labels, primary, channel, path,
-            interval, once=False, page=1):
+def monitor(samples, fetch, save, **options):
+    with Learner(options["path"].with_suffix(".lernen.sqlite3"), channel=options["channel"]) as learner:
+        return _monitor(samples, fetch, save, learner=learner, **options)
+
+
+def _monitor(samples, fetch, save, *, title, labels, primary, channel, path,
+             interval, once=False, page=1, metric=None, learner):
     console = Console()
-    report = Report(samples, title, labels, primary, channel, path, interval)
+    report = Report(samples, title, labels, metric or primary, channel, path, interval, learner)
+    with console.status("Werte die bisherige Messhistorie chronologisch aus …"):
+        learner.bootstrap(report.series)
+        report.update_predictions()
     status = "Starte Abruf …"
 
     def accept(sample):
@@ -350,6 +441,7 @@ def monitor(samples, fetch, save, *, title, labels, primary, channel, path,
         save(sample)
         samples.append(sample)
         report.refresh()
+        report.learn()
 
     if once:
         try:
@@ -378,8 +470,10 @@ def monitor(samples, fetch, save, *, title, labels, primary, channel, path,
                 if "q" in pressed:
                     break
                 for key in pressed:
-                    if key in "1234":
+                    if key in "123456":
                         page = int(key)
+                    if key == "m" or key == "\t":
+                        report.cycle_metric()
                     if key == "r" and not busy:
                         next_poll = time.monotonic()
                 if busy:

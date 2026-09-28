@@ -29,7 +29,7 @@ class TuiTests(unittest.TestCase):
         console = Console(width=80, height=24, file=StringIO())
         console.print(report.screen(console, 1, "Aktuell", time.monotonic()+30, False))
         lines = console.file.getvalue().splitlines()
-        self.assertTrue(lines[-3].rstrip().endswith("╯"))
+        self.assertTrue(lines[-4].rstrip().endswith("╯"))
 
     def test_empty_history_and_fetch_error_still_offer_controls(self):
         report = Report([], "@test", LABELS, "views", False, Path("test.jsonl"), 30)
@@ -39,3 +39,17 @@ class TuiTests(unittest.TestCase):
         self.assertIn("Abruf fehlgeschlagen", text)
         self.assertIn("Sammelt Daten", text)
         self.assertIn("q Ende", text)
+
+    def test_likes_and_comments_have_the_same_horizons_and_metric_switch(self):
+        samples = [Sample(100000+i*30, 100000+i*50, 100+i, 20+i//3, 1, 0) for i in range(121)]
+        report = Report(samples, "@test", LABELS, "views", False, Path("test.jsonl"), 30)
+        for expected in ("likes", "comments", "views"):
+            report.cycle_metric()
+            self.assertEqual(report.primary, expected)
+            console = Console(width=60, height=20, file=StringIO())
+            console.print(report.screen(console, 2, "Aktuell", time.monotonic()+30, False))
+            text = console.file.getvalue()
+            self.assertIn(LABELS[expected], text)
+            for hours in (1, 2, 6, 12, 24, 48):
+                self.assertIn(f"{hours} h", text)
+            self.assertIn("q Ende", text)

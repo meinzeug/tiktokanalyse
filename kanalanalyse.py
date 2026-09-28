@@ -131,8 +131,10 @@ def main(argv: list[str] | None = None) -> int:
                         default=Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "tiktokanalyse",
                         help="Verzeichnis für die Messhistorie")
     parser.add_argument("--once", action="store_true", help="Einmal abrufen und Ergebnis ausgeben")
-    parser.add_argument("--page", type=int, choices=(1, 2, 3, 4), default=1,
-                        help="Startansicht: 1 Übersicht, 2 Prognose, 3 Verlauf, 4 Details")
+    parser.add_argument("--page", type=int, choices=(1, 2, 3, 4, 5, 6), default=1,
+                        help="Startansicht: 1 Übersicht, 2 Prognose, 3 Verlauf, 4 Details, 5 Lernen, 6 Fehler")
+    parser.add_argument("--metric", choices=("followers", "likes"), default="followers",
+                        help="Ausgewählte Kennzahl (in der TUI mit m wechseln)")
     args = parser.parse_args(argv)
     try:
         url, username = parse_profile_url(args.url)
@@ -151,7 +153,7 @@ def main(argv: list[str] | None = None) -> int:
                    lambda sample: save_profile_sample(path, sample),
                    title=f"@{username} • Kanal", labels=LABELS, primary="followers",
                    channel=True, path=path, interval=args.interval,
-                   once=args.once, page=args.page)
+                   once=args.once, page=args.page, metric=args.metric)
 
 
 if __name__ == "__main__":
