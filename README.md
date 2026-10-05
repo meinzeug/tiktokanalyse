@@ -1,6 +1,6 @@
 # TikTok-Analyse
 
-Öffentliche Video- und Kanalzahlen direkt im Linux-Terminal verfolgen. Beide Befehle lesen das eingebettete JSON aus dem HTML der TikTok-Seite, speichern Messpunkte lokal und zeigen Tempo, Trendwechsel und Szenarien.
+Öffentliche Video-, Foto- und Kanalzahlen direkt im Linux-Terminal verfolgen. Beide Befehle lesen das eingebettete JSON aus dem HTML der TikTok-Seite, speichern Messpunkte lokal und zeigen Tempo, Trendwechsel und Szenarien.
 
 ## Installation und Update
 
@@ -22,6 +22,7 @@ Falls `~/.local/bin` noch nicht im `PATH` liegt: `pipx ensurepath` ausführen un
 
 ```bash
 analysiere https://www.tiktok.com/@zeitkante/video/7689442016555568416
+analysiere https://www.tiktok.com/@zeitkante/photo/7693220884814777632
 analysiere https://www.tiktok.com/@zeitkante/video/7689442016555568416 --interval 60 --page 2
 analysiere https://www.tiktok.com/@zeitkante/video/7689442016555568416 --metric likes --page 2
 analysiere https://www.tiktok.com/@zeitkante/video/7689442016555568416 --metric comments --page 5
@@ -31,7 +32,9 @@ analysierekanal https://www.tiktok.com/@zeitkante --interval 120
 analysierekanal https://www.tiktok.com/@zeitkante --horizon 1y --page 2
 ```
 
-`--once` ruft einmal ab und druckt die Prognosen und Lernstände aller verfügbaren Kennzahlen für den ausgewählten Zeitraum ohne Vollbild. `--page 1` bis `6` wählt die Startansicht. Videos bieten `--metric views`, `likes` und `comments`, Kanäle `followers` und `likes`. Das Profil-HTML enthält keinen Kommentar-Gesamtzähler für den Kanal.
+`--once` ruft einmal ab und druckt die Prognosen und Lernstände aller verfügbaren Kennzahlen für den ausgewählten Zeitraum ohne Vollbild. `--page 1` bis `6` wählt die Startansicht. Video- und Fotobeiträge bieten `--metric views`, `likes` und `comments`, Kanäle `followers` und `likes`. Das Profil-HTML enthält keinen Kommentar-Gesamtzähler für den Kanal.
+
+`analysiere` unterstützt sowohl `/video/…` als auch `/photo/…`. Enthält die Fotoseite keine auswertbaren Statistikdaten, wird zusätzlich die reguläre `/video/…`-Adresse **derselben Beitrags-ID** abgerufen. Jeder Abruf muss Daten für genau diese ID liefern; fehlende Aufruf-, Like-, Kommentar- oder Teilen-Zähler werden nicht durch Nullwerte ersetzt. Fotos nutzen dieselben Ansichten, Prognosen und die eigene Mess- und Lernhistorie unter `<beitrags-id>.jsonl` und `<beitrags-id>.lernen.sqlite3`. Verschiedene URL-Varianten derselben ID verwenden dieselben Dateien.
 
 | Taste | Ansicht / Aktion |
 | --- | --- |

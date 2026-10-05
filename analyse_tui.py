@@ -146,7 +146,7 @@ class Report:
             self.update_predictions()
 
     def header(self, width: int):
-        mode = "KANAL" if self.channel else "VIDEO"
+        mode = "KANAL" if self.channel else "BEITRAG"
         return Panel(Text(f"{self.title} • {self.labels[self.primary]}", style="bold cyan", overflow="ellipsis", no_wrap=True),
                      title=f"TIKTOK • {mode} LIVE", border_style="cyan")
 

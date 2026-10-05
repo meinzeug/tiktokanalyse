@@ -1,4 +1,4 @@
-"""Live-Analyse öffentlicher TikTok-Videoseiten."""
+"""Live-Analyse öffentlicher TikTok-Video- und Fotobeiträge."""
 
 from __future__ import annotations
 
@@ -73,12 +73,13 @@ class Sample:
 def parse_url(url: str) -> tuple[str, str, str]:
     parsed = urlparse(url)
     if parsed.scheme != "https" or parsed.hostname not in {"tiktok.com", "www.tiktok.com", "m.tiktok.com"}:
-        raise ValueError("Bitte eine HTTPS-Videoadresse von tiktok.com angeben.")
-    match = re.fullmatch(r"/@([A-Za-z0-9._]+)/video/(\d+)", parsed.path.rstrip("/"))
+        raise ValueError("Bitte eine HTTPS-Beitragsadresse von tiktok.com angeben.")
+    match = re.fullmatch(r"/@([A-Za-z0-9._]+)/(video|photo)/(\d+)", parsed.path.rstrip("/"))
     if not match:
-        raise ValueError("Erwartet: https://www.tiktok.com/@name/video/123456789")
-    creator, video_id = match.groups()
-    return f"https://www.tiktok.com/@{creator}/video/{video_id}", creator, video_id
+        raise ValueError("Erwartet: https://www.tiktok.com/@name/video/123456789 "
+                         "oder https://www.tiktok.com/@name/photo/123456789")
+    creator, post_type, video_id = match.groups()
+    return f"https://www.tiktok.com/@{creator}/{post_type}/{video_id}", creator, video_id
 
 
 def _number(value: object, key: str) -> int:
@@ -101,28 +102,37 @@ def parse_html(html: str, video_id: str, timestamp: float | None = None) -> Samp
             data = json.loads(extractor.scripts["__UNIVERSAL_DATA_FOR_REHYDRATION__"])
             item = data["__DEFAULT_SCOPE__"]["webapp.video-detail"]["itemInfo"]["itemStruct"]
         except (KeyError, TypeError, json.JSONDecodeError) as exc:
-            raise ParseError("Videodaten fehlen im eingebetteten JSON (Sperre oder Layoutänderung?).") from exc
+            raise ParseError("Beitragsdaten fehlen im eingebetteten JSON (Sperre oder Layoutänderung?).") from exc
     elif "SIGI_STATE" in extractor.scripts:
         try:
             data = json.loads(extractor.scripts["SIGI_STATE"])
             item = data["ItemModule"][video_id]
         except (KeyError, TypeError, json.JSONDecodeError) as exc:
-            raise ParseError("Videodaten fehlen im eingebetteten JSON (Sperre oder Layoutänderung?).") from exc
+            raise ParseError("Beitragsdaten fehlen im eingebetteten JSON (Sperre oder Layoutänderung?).") from exc
     if not isinstance(item, dict) or str(item.get("id")) != video_id:
-        raise ParseError("Die HTML-Seite enthält keine Daten für die angefragte Video-ID.")
+        raise ParseError("Die HTML-Seite enthält keine Daten für die angefragte Beitrags-ID.")
     stats = item.get("statsV2") or item.get("stats")
     if not isinstance(stats, dict):
         raise ParseError("Statistikdaten fehlen im HTML.")
     values = {}
     for name, key in STAT_KEYS.items():
-        # Ältere Seiten liefern nicht immer die Anzahl der gespeicherten Videos.
+        # Ältere Seiten liefern nicht immer die Anzahl der gespeicherten Beiträge.
         raw = stats.get(key, 0 if name == "favorites" else None)
         values[name] = _number(raw, key)
     return Sample(timestamp if timestamp is not None else time.time(), **values)
 
 
 def fetch_sample(url: str, video_id: str) -> Sample:
-    return parse_html(fetch_html(url), video_id)
+    html = fetch_html(url)
+    try:
+        return parse_html(html, video_id)
+    except ParseError:
+        if "/photo/" not in urlparse(url).path:
+            raise
+    # Fotoseiten liefern teilweise nur die App-Hülle. Die reguläre Video-Route
+    # derselben Beitrags-ID enthält dann auch für Fotos die Statistikdaten.
+    # parse_html prüft weiterhin die angefragte ID, bevor Werte übernommen werden.
+    return parse_html(fetch_html(url.replace("/photo/", "/video/", 1)), video_id)
 
 
 def fetch_html(url: str) -> str:
@@ -177,8 +187,8 @@ def save_sample(path: Path, video_id: str, sample: Sample) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="TikTok-Videostatistiken live verfolgen")
-    parser.add_argument("url", help="HTTPS-Adresse eines öffentlichen TikTok-Videos")
+    parser = argparse.ArgumentParser(description="TikTok-Video- und Fotostatistiken live verfolgen")
+    parser.add_argument("url", help="HTTPS-Adresse eines öffentlichen TikTok-Video- oder Fotobeitrags")
     parser.add_argument("--interval", type=float, default=30, metavar="SEKUNDEN",
                         help="Abrufintervall in Sekunden (Standard: 30; Minimum: 10)")
     parser.add_argument("--data-dir", type=Path,
@@ -204,9 +214,10 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as exc:
         console.print(f"[red]Messhistorie nicht lesbar:[/red] {exc}")
         return 1
+    post_label = "Fotobeitrag" if "/photo/" in url else "Video"
     return monitor(samples, lambda: fetch_sample(url, video_id),
                    lambda sample: save_sample(path, video_id, sample),
-                   title=f"@{creator} • Video {video_id}", labels=LABELS,
+                   title=f"@{creator} • {post_label} {video_id}", labels=LABELS,
                    primary="views", channel=False, path=path, interval=args.interval,
                    once=args.once, page=args.page, metric=args.metric, horizon=args.horizon)
 

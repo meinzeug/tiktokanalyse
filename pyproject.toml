@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tiktokanalyse"
-version = "0.4.1"
-description = "TikTok-Videostatistiken live im Terminal verfolgen"
+version = "0.4.2"
+description = "TikTok-Video- und Fotostatistiken live im Terminal verfolgen"
 requires-python = ">=3.10"
 dependencies = ["rich>=13,<15"]
 
